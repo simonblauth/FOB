@@ -14,4 +14,4 @@ optimizer:
     decay_factor: 0.1        # only used if lr_scheduler == 'wsd'
     decay_steps: null        # only used if lr_scheduler == 'wsd', overrides decay_factor
     step_size: 10            # only used if lr_scheduler == 'stepwise'
-    gamma: 0.1               # only used if lr_scheduler == 'stepwise' or 'exponential'
+    gamma: 0.1               # only used if lr_scheduler == 'stepwise' or 'exponential', if set to null, it will be set according to 'eta_min_factor'.

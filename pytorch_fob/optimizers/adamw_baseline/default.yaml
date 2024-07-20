@@ -6,4 +6,5 @@ optimizer:
   beta2: 0.999          # AdamW parameter
   weight_decay: 0.01    # AdamW parameter
   epsilon: 1.e-8        # AdamW parameter
+  foreach: null
   # for lr scheduler parameters see `lr_schedulers/default.yaml`

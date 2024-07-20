@@ -2,9 +2,8 @@ optimizer:
   name: adam_plus
   lr_grad: 1.e-6        # the increase of learning rate per step during the warmup phase
   lr_decay: 0.01         # the minimum learning rate given as a factor of the base learning rate, same as 'lr_scheduler.eta_min_factor'
+  weight_decay: 0.01    # weight decay
   beta1: 0.9            # Adam parameter
   beta2: 0.999          # Adam parameter
   epsilon: 1.e-8        # Adam parameter
   reg_step_size: 100    # Interval in which to check for inflection point
-  kappa_update: 1.0     # The rate at which to update the lagrange multiplier
-  foreach: null

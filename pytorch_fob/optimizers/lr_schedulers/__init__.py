@@ -2,7 +2,7 @@ from pathlib import Path
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR, ExponentialLR, LRScheduler, PolynomialLR, StepLR
 from pytorch_fob.engine.configs import OptimizerConfig
-from pytorch_fob.engine.utils import log_warn
+from pytorch_fob.engine.utils import log_warn, some
 from .warmup import cosine_warmup, decay_steps_from_config, linear_warmup, \
                     warmup_split, warmup_split_from_config, _warmup
 from .schedulers import wsd_scheduler, IdentityLR
@@ -64,9 +64,13 @@ def get_lr_scheduler(optimizer: torch.optim.Optimizer, config: OptimizerConfig) 
             gamma=config.lr_scheduler.gamma,
         )
     elif config.lr_scheduler.scheduler == "exponential":
+        gamma =  some(
+            config.lr_scheduler.gamma,
+            default=config.lr_scheduler.eta_min_factor ** (1 / scheduler_steps)
+        )
         base_scheduler = ExponentialLR
         scheduler_kwargs = dict(
-            gamma=config.lr_scheduler.gamma,
+            gamma=gamma,
         )
     else:
         raise ValueError(f"Unknown scheduler: {config.lr_scheduler.scheduler}")

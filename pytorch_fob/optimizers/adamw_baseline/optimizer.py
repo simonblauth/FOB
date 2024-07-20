@@ -15,7 +15,7 @@ def configure_optimizers(model: GroupedModel, config: OptimizerConfig) -> Optimi
         eps=config.epsilon,
         betas=(config.beta1, config.beta2),
         weight_decay=weight_decay,
-        fused=False
+        foreach=config.foreach,
     )
     lr_scheduler = get_lr_scheduler(optimizer, config)
     return {
