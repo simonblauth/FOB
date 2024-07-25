@@ -19,7 +19,7 @@ class ImagenetModel(TaskModel):
         model_name: str = config.model.name
         # we want to create exactly the model the user specified in the yaml
         try:
-            model = create_model(model_name)
+            model = create_model(model_name, **config.model.kwargs_timm)
         except RuntimeError as e:
             available_models = list_models()
             log_info(f"Available Models are {available_models}")
@@ -30,9 +30,9 @@ class ImagenetModel(TaskModel):
             # 7x7 conv might be pretty large for 64x64 images
             model.conv1 = nn.Conv2d(3,  # rgb color
                                     64,
-                                    kernel_size=config.model.kernel_size,
-                                    stride=config.model.stride,
-                                    padding=config.model.padding,
+                                    kernel_size=config.model.stem.kernel_size,
+                                    stride=config.model.stem.stride,
+                                    padding=config.model.stem.padding,
                                     bias=False
                                     )
             # pooling small images might be bad

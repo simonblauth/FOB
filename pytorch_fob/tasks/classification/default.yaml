@@ -15,9 +15,11 @@ task:
   label_smoothing: 0.0
   model:
    name: wide_resnet50_2
-   kernel_size: 3
-   stride: 1
-   padding: 1
+   kwargs_timm: {}  # will be passed to timm.create_model along with model name
+   stem:            # for chenging stem of certain models
+    kernel_size: 3
+    stride: 1
+    padding: 1
    maxpool: True
   train_transforms:
     random_crop:
