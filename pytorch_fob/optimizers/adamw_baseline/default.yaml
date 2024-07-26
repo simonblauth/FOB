@@ -7,4 +7,5 @@ optimizer:
   weight_decay: 0.01    # AdamW parameter
   epsilon: 1.e-8        # AdamW parameter
   foreach: null
+  mup_scaling: false    # Whether to use μP-scaling.
   # for lr scheduler parameters see `lr_schedulers/default.yaml`
