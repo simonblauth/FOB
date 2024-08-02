@@ -5,9 +5,9 @@ import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import v2
 from transformers.utils import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from pytorch_fob.engine.utils import log_info
 from pytorch_fob.tasks import TaskDataModule
 from pytorch_fob.engine.configs import TaskConfig
-
 
 class Imagenet64Dataset(Dataset):
     def __init__(self, data_source) -> None:
@@ -24,6 +24,21 @@ class Imagenet64Dataset(Dataset):
 
     def set_transform(self, transforms):
         self.transforms = transforms
+
+
+class Imagenet64DatasetCached(Imagenet64Dataset):
+    def __init__(self, data_source) -> None:
+        super().__init__(data_source)
+        self.images = []
+        self.labels = []
+
+        log_info("loading dataset to memory...")
+        for item in self.data:
+            self.images.append(np.array(item["image"]))
+            self.labels.append(np.array(item["label"]))
+
+    def __getitem__(self, index):
+        return {"image": self.transforms(self.images[index]), "label": self.labels[index]}
 
 
 class ImagenetDataModule(TaskDataModule):
@@ -78,27 +93,35 @@ class ImagenetDataModule(TaskDataModule):
     def setup(self, stage: str):
         """setup is called from every process across all the nodes. Setting state here is recommended.
         """
+        self._setup(stage)
+
+    def _setup(self, stage: str, cache_data: bool = False):
         if stage == "fit":
-            self.data_train = self._load_dataset("train")
-            self.data_val = self._load_dataset("validation")
+            self.data_train = self._load_dataset("train", cache_data=cache_data)
+            self.data_val = self._load_dataset("validation", cache_data=cache_data)
             self.data_train.set_transform(self.train_transforms)
             self.data_val.set_transform(self.val_transforms)
         if stage == "validate":
-            self.data_val = self._load_dataset("validation")
+            self.data_val = self._load_dataset("validation", cache_data=cache_data)
             self.data_val.set_transform(self.val_transforms)
         if stage == "test":
-            self.data_test = self._load_dataset("validation")
+            self.data_test = self._load_dataset("validation", cache_data=cache_data)
             self.data_test.set_transform(self.val_transforms)
         if stage == "predict":
-            self.data_predict = self._load_dataset("validation")
+            self.data_predict = self._load_dataset("validation", cache_data=cache_data)
             self.data_predict.set_transform(self.val_transforms)
 
-    def _load_dataset(self, split: str) -> Imagenet64Dataset:
+    def cache_data(self, stage: str):
+        if not self.config.cache_data:
+            return
+        self._setup(stage, cache_data=True)
+
+    def _load_dataset(self, split: str, cache_data: bool = False) -> Imagenet64Dataset:
         ds = tfds.data_source(
             "imagenet_resized/64x64",
             split=split,
             data_dir=self.data_dir,
             download=False
         )
-        rds = Imagenet64Dataset(ds)
+        rds = Imagenet64DatasetCached(ds) if cache_data else Imagenet64Dataset(ds)
         return rds

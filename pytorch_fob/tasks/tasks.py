@@ -4,7 +4,8 @@ from pathlib import Path
 from lightning import LightningModule, LightningDataModule
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
+from pytorch_fob.engine.utils import log_info
 from pytorch_fob.optimizers import Optimizer
 from pytorch_fob.engine.configs import TaskConfig
 from pytorch_fob.engine.parameter_groups import GroupedModel
@@ -64,6 +65,23 @@ class TaskDataModule(LightningDataModule):
             raise NotImplementedError("Each task configures its own batch_size. \
                                       Please set it explicitely, to avoid confusion.")
 
+    def cache_data(self, stage: str):
+        if not self.config.cache_data:
+            return
+        if stage == "fit":
+            self._cache_dataset("train", self.data_train)
+            self._cache_dataset("val", self.data_val)
+        if stage == "validate":
+            self._cache_dataset("val", self.data_val)
+        if stage == "test":
+            self._cache_dataset("test", self.data_test)
+        if stage == "predict":
+            self._cache_dataset("predict", self.data_predict)
+
+    def _cache_dataset(self, dataset: str, data: Dataset):
+        log_info(f"loading {dataset} dataset to memory...")
+        data = CachedDataset(data)
+
     def train_dataloader(self):
         self.check_dataset(self.data_train)
         return DataLoader(
@@ -100,3 +118,16 @@ class TaskDataModule(LightningDataModule):
             num_workers=self.workers,
             collate_fn=self.collate_fn
         )
+
+
+class CachedDataset(Dataset):
+    def __init__(self, data: Dataset):
+        self.cache = []
+        for i in data:
+            self.cache.append(i)
+
+    def __getitem__(self, index):
+        return self.cache[index]
+
+    def __len__(self):
+        return len(self.cache)

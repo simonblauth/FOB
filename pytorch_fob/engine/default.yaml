@@ -1,5 +1,6 @@
 engine: 
   accelerator: gpu           # Whether to train on cpu or gpu
+  cache_data: false          # Whether to cache dataset in memory before training. Can speed up training, but requires more memory, depending on the task.
   check_finite: true         # Check if 'early_stopping_metric' is finite during training. Aborts training if not. Only active when 'early_stopping' is not null.
   data_dir: ./data           # Where you want to store the training data
   deterministic: warn        # 'warn' tries to use deterministic algorithms if possible, also accepts true or false.

@@ -37,6 +37,10 @@ class RestrictTrainEpochs(Callback):
         # checkpoint loads the model at the end of the epoch, so we do not count the first epoch
         self.skip_first = True
 
+class DatasetCaching(Callback):
+    def on_fit_start(self, trainer: Trainer, pl_module: LightningModule):
+        trainer.datamodule.cache_data("fit")  # type: ignore
+
 
 class PrintEpochWithTime(Callback):
     def __init__(self, active: bool = True):
