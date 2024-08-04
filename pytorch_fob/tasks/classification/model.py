@@ -58,10 +58,12 @@ class ImagenetModel(TaskModel):
         # we want to create exactly the model the user specified in the yaml
         if model_name == "width_scaling_vit":
             model = WidthScalingVisionTransformer(width=config.model.width, **config.model.kwargs_timm)
-            base_model = WidthScalingVisionTransformer(width=1, **config.model.kwargs_timm)
-            delta_model = WidthScalingVisionTransformer(width=2, **config.model.kwargs_timm)
-            set_base_shapes(model, base_model, delta=delta_model)
-            model.reset_weights()
+            # μP-scaling is active by default in width_scaling_vit, but we can disable it via config
+            if "mup_scaling" not in config.model or config.model.mup_scaling:
+                base_model = WidthScalingVisionTransformer(width=1, **config.model.kwargs_timm)
+                delta_model = WidthScalingVisionTransformer(width=2, **config.model.kwargs_timm)
+                set_base_shapes(model, base_model, delta=delta_model)
+                model.reset_weights()
         else:
             try:
                 model = create_model(model_name, **config.model.kwargs_timm)
