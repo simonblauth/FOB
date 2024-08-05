@@ -9,7 +9,7 @@ from mup.init import trunc_normal_, normal_
 
 
 class WidthScalingVisionTransformer(VisionTransformer):
-    def __init__(self, *args, width: int=12, **kwargs):
+    def __init__(self, *args, width: int=12, replace_head: bool=True, **kwargs):
         embed_dim_per_head = 64
         kwargs["embed_dim"] = width * embed_dim_per_head
         kwargs["num_heads"] = width
@@ -20,7 +20,8 @@ class WidthScalingVisionTransformer(VisionTransformer):
         if "num_classes" not in kwargs:
             kwargs["num_classes"] = 1000
         super().__init__(*args, **kwargs)
-        self.head = MuReadout(self.num_features, self.num_classes) if self.num_classes > 0 else nn.Identity()
+        if replace_head:
+            self.head = MuReadout(self.num_features, self.num_classes) if self.num_classes > 0 else nn.Identity()
 
     def reset_weights(self, mode: str = ''):
         """Override custom timm initialization with μP-scaling init. Must be called after calling `set_base_shapes`."""
