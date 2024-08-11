@@ -13,6 +13,7 @@ task:
   #   stem: custom_conv  # {default, wrn_conv, custom_conv}
   # wide res net
   label_smoothing: 0.0
+  image_size: 64
   model:
    name: wide_resnet50_2
    kwargs_timm: {}  # will be passed to timm.create_model along with model name
@@ -20,18 +21,18 @@ task:
     kernel_size: 3
     stride: 1
     padding: 1
-   maxpool: True
+   maxpool: true
   train_transforms:
     random_crop:
-      use: True
+      use: true
       size: 64
       padding: 4
       padding_mode: reflect
     horizontal_flip:
-      use: True
+      use: true
       p: 0.5
     trivial_augment:
-      use: True
+      use: true
 engine:
   devices: 4
   sbatch_args:
