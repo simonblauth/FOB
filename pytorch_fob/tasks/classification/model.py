@@ -2,7 +2,9 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torchvision.transforms.v2 import Identity
 from timm import create_model, list_models
+from timm.data import Mixup
 from mup import set_base_shapes
 from sklearn.metrics import top_k_accuracy_score
 from pytorch_fob.tasks import TaskModel
@@ -11,19 +13,23 @@ from pytorch_fob.engine.utils import log_warn, log_info
 from pytorch_fob.optimizers import Optimizer
 from .scaling_vit import WidthScalingVisionTransformer
 
+
 class ImagenetModel(TaskModel):
     def __init__(self, optimizer: Optimizer, config: TaskConfig):
         model = self._create_model(config)
         super().__init__(model, optimizer, config)
-        self.loss_fn = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+        self.train_loss_fn = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+        self.val_loss_fn = nn.CrossEntropyLoss()
+        self.transforms = self._get_train_transforms(config)
 
     def forward(self, batch) -> tuple[torch.Tensor, torch.Tensor]:
         imgs, labels = batch
         return self.model(imgs), labels
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
-        preds, labels = self.forward(batch)
-        loss = self.compute_and_log_loss(preds, labels, "train")
+        imgs, labels = batch
+        preds, soft_labels = self.forward(self.transforms(imgs, labels))
+        loss = self.compute_and_log_loss(preds, soft_labels, "train")
         self.compute_and_log_acc(preds, labels, "train")
         return loss
 
@@ -49,7 +55,10 @@ class ImagenetModel(TaskModel):
         return {"top1": top_1_acc, "top5": top_5_acc}
 
     def compute_and_log_loss(self, preds: torch.Tensor, labels: torch.Tensor, stage: str) -> torch.Tensor:
-        loss = self.loss_fn(preds, labels)
+        if stage == "train":
+            loss = self.train_loss_fn(preds, labels)
+        else:
+            loss = self.val_loss_fn(preds, labels)
         self.log(f"{stage}_loss", loss, sync_dist=True)
         return loss
 
@@ -112,6 +121,13 @@ class ImagenetModel(TaskModel):
                 log_warn(f"stem argument '{config.model.stem}' unknown to classification task.")
 
         return model
+
+    def _get_train_transforms(self, config: TaskConfig):
+        if "mixup" in config.train_transforms:
+            kwargs = config.train_transforms.mixup
+            kwargs["label_smoothing"] = 0.  # label smoothing is handled in the loss function
+            return Mixup(**kwargs)
+        return Identity()
 
 
 class LayerNorm2d(nn.LayerNorm):
