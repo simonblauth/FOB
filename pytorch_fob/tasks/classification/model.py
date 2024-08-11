@@ -18,7 +18,7 @@ class ImagenetModel(TaskModel):
         self.loss_fn = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
 
     def forward(self, batch) -> tuple[torch.Tensor, torch.Tensor]:
-        imgs, labels = batch["image"], batch["label"]
+        imgs, labels = batch
         return self.model(imgs), labels
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:

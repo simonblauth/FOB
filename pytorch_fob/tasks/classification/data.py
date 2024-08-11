@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence
 import numpy as np
 import tensorflow_datasets as tfds
 import torch
@@ -11,26 +11,41 @@ from pytorch_fob.engine.utils import log_info
 from pytorch_fob.tasks import TaskDataModule
 from pytorch_fob.engine.configs import TaskConfig
 
+
+class ImageFolderCached(ImageFolder):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.images = []
+        self.labels = []
+
+        log_info("loading dataset to memory...")
+        for path, label in self.samples:
+            self.images.append(self.loader(path))
+            self.labels.append(label)
+
+    def __getitem__(self, index):
+        image = self.images[index] if self.transform is None else self.transform(self.images[index])
+        label = self.targets[index] if self.target_transform is None else self.target_transform(self.targets[index])
+        return image, label
+
+
 class Imagenet64Dataset(Dataset):
-    def __init__(self, data_source) -> None:
+    def __init__(self, data_source, transform) -> None:
         super().__init__()
         self.data = data_source
-        self.transforms: Any
+        self.transform = transform
 
     def __len__(self) -> int:
         return len(self.data)
 
     def __getitem__(self, index):
         img = np.array(self.data[index]["image"])  # need to make copy because original is not writable
-        return {"image": self.transforms(img), "label": self.data[index]["label"]}
-
-    def set_transform(self, transforms):
-        self.transforms = transforms
+        return self.transform(img), self.data[index]["label"]
 
 
 class Imagenet64DatasetCached(Imagenet64Dataset):
-    def __init__(self, data_source) -> None:
-        super().__init__(data_source)
+    def __init__(self, *args) -> None:
+        super().__init__(*args)
         self.images = []
         self.labels = []
 
@@ -40,24 +55,41 @@ class Imagenet64DatasetCached(Imagenet64Dataset):
             self.labels.append(np.array(item["label"]))
 
     def __getitem__(self, index):
-        return {"image": self.transforms(self.images[index]), "label": self.labels[index]}
+        return self.transform(self.images[index]), self.labels[index]
 
 
 class ImagenetDataModule(TaskDataModule):
     def __init__(self, config: TaskConfig):
         super().__init__(config)
         self.image_size = config.image_size
+        self.resize = self.image_size not in [16, 32, 64]
         self.train_transforms = self._get_train_transforms(config)
-        self.val_transforms = self._get_transforms()
+        self.val_transforms = self._get_val_transforms()
 
     def _get_transforms(self, extra: Sequence[Callable] = tuple()):
         return v2.Compose([
             v2.ToImage(),
+            *self._get_resized_transforms(),
             *extra,
             v2.ToDtype(torch.float, scale=True),
             v2.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
             v2.ToPureTensor()
         ])
+
+    def _get_resized_transforms(self):
+        if self.resize:
+            return [
+                v2.Resize(
+                    self.image_size,
+                    interpolation=v2.InterpolationMode.BICUBIC,
+                    antialias=True,
+                ),
+                v2.CenterCrop(self.image_size),
+            ]
+        return []
+
+    def _get_val_transforms(self):
+        return self._get_transforms()
 
     def _get_train_transforms(self, config: TaskConfig):
         # override for timm transforms
@@ -103,17 +135,12 @@ class ImagenetDataModule(TaskDataModule):
         if stage == "fit":
             self.data_train = self._load_dataset("train", cache_data=cache_data)
             self.data_val = self._load_dataset("validation", cache_data=cache_data)
-            self.data_train.set_transform(self.train_transforms)
-            self.data_val.set_transform(self.val_transforms)
         if stage == "validate":
             self.data_val = self._load_dataset("validation", cache_data=cache_data)
-            self.data_val.set_transform(self.val_transforms)
         if stage == "test":
             self.data_test = self._load_dataset("validation", cache_data=cache_data)
-            self.data_test.set_transform(self.val_transforms)
         if stage == "predict":
             self.data_predict = self._load_dataset("validation", cache_data=cache_data)
-            self.data_predict.set_transform(self.val_transforms)
 
     def cache_data(self, stage: str):
         if not self.config.cache_data:
@@ -125,26 +152,39 @@ class ImagenetDataModule(TaskDataModule):
             split: Optional[str],
             cache_data: bool = False,
             download: bool = False
-        ) -> Imagenet64Dataset:
+        ) -> Dataset:
         if self.image_size in [16, 32, 64]:
             ds = tfds.data_source(
-                "imagenet_resized/64x64",
+                f"imagenet_resized/{self.image_size}x{self.image_size}",
                 split=split,
                 data_dir=self.data_dir,
                 download=download
             )
+            ds_cls = Imagenet64DatasetCached if cache_data else Imagenet64Dataset
         elif self.image_size == 224:
             path = self.data_dir / "imagenet_full" if "imagenet_path" not in self.config else Path(self.config.imagenet_path)
             if download:
                 _check_imagenet_files(path)
-            if split == "train":
-                ds = ImageFolder(str(path / "train"), transform=self.train_transforms)  # type: ignore
+            if split == "train" or split is None:
+                ds = str(path / "train")
             elif split == "validation":
-                ds = ImageFolder(str(path / "val"), transform=self.val_transforms)
+                ds = str(path / "val")
+            else:
+                raise ValueError(f"Unknown split {split}")
+            ds_cls = ImageFolderCached if cache_data else ImageFolder
         else:
             raise ValueError(f"Image size {self.image_size} not supported")
-        rds = Imagenet64DatasetCached(ds) if cache_data else Imagenet64Dataset(ds)
-        return rds
+        return ds_cls(ds, transform=self._get_transforms_from_split(split))  # type: ignore
+        
+    def _get_transforms_from_split(self, split: Optional[str]):
+        if split is None:
+            return None
+        if split == "train":
+            return self.train_transforms
+        elif split == "validation":
+            return self.val_transforms
+        else:
+            raise ValueError(f"Unknown split {split}")
 
 
 def _check_imagenet_files(data_dir: Path):
