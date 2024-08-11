@@ -62,12 +62,14 @@ class ImagenetDataModule(TaskDataModule):
     def _get_train_transforms(self, config: TaskConfig):
         # override for timm transforms
         if "kwargs_timm" in config.train_transforms:
-            return create_transform(
+            tfs = create_transform(
                 input_size=self.image_size,
                 is_training=True,
-                **config.train_transforms.timm_kwargs
+                **config.train_transforms.kwargs_timm
             )
-        # reading setting
+            tfs.transforms.insert(0, v2.ToPILImage())
+            return tfs
+        # reading settings
         tfs = []
         if config.train_transforms.random_crop.use:
             random_crop = v2.RandomCrop(
