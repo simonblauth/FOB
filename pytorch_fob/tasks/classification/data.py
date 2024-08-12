@@ -12,7 +12,21 @@ from pytorch_fob.tasks import TaskDataModule
 from pytorch_fob.engine.configs import TaskConfig
 
 
-class ImageFolderCached(ImageFolder):
+class RepeatedImageFolder(ImageFolder):
+    def __init__(self, *args, num_augmentations: int = 1, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.num_augmentations = num_augmentations
+
+    def __len__(self) -> int:
+        return len(self.samples) * self.num_augmentations
+
+    def __getitem__(self, index):
+        orig_index = index // self.num_augmentations
+        return super().__getitem__(orig_index)
+
+
+class ImageFolderCached(RepeatedImageFolder):
+    # TODO: find a way to share the memory between processes, otherwise this is useless
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.images = []
@@ -24,28 +38,31 @@ class ImageFolderCached(ImageFolder):
             self.labels.append(label)
 
     def __getitem__(self, index):
-        image = self.images[index] if self.transform is None else self.transform(self.images[index])
-        label = self.targets[index] if self.target_transform is None else self.target_transform(self.targets[index])
+        orig_index = index // self.num_augmentations
+        image = self.images[orig_index] if self.transform is None else self.transform(self.images[orig_index])
+        label = self.targets[orig_index] if self.target_transform is None else self.target_transform(self.targets[orig_index])
         return image, label
 
 
 class Imagenet64Dataset(Dataset):
-    def __init__(self, data_source, transform) -> None:
+    def __init__(self, data_source, transform, num_augmentations: int = 1) -> None:
         super().__init__()
         self.data = data_source
         self.transform = transform
+        self.num_augmentations = num_augmentations
 
     def __len__(self) -> int:
-        return len(self.data)
+        return len(self.data) * self.num_augmentations
 
     def __getitem__(self, index):
-        img = np.array(self.data[index]["image"])  # need to make copy because original is not writable
-        return self.transform(img), self.data[index]["label"]
+        orig_index = index // self.num_augmentations
+        img = np.array(self.data[orig_index]["image"])  # need to make copy because original is not writable
+        return self.transform(img), self.data[orig_index]["label"]
 
 
 class Imagenet64DatasetCached(Imagenet64Dataset):
-    def __init__(self, *args) -> None:
-        super().__init__(*args)
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         self.images = []
         self.labels = []
 
@@ -55,7 +72,8 @@ class Imagenet64DatasetCached(Imagenet64Dataset):
             self.labels.append(np.array(item["label"]))
 
     def __getitem__(self, index):
-        return self.transform(self.images[index]), self.labels[index]
+        orig_index = index // self.num_augmentations
+        return self.transform(self.images[orig_index]), self.labels[orig_index]
 
 
 class ImagenetDataModule(TaskDataModule):
@@ -65,6 +83,7 @@ class ImagenetDataModule(TaskDataModule):
         self.resize = self.image_size not in [16, 32, 64]
         self.train_transforms = self._get_train_transforms(config)
         self.val_transforms = self._get_val_transforms()
+        self.num_augmentations = config.train_transforms.repeat_augmentations
 
     def _get_transforms(self, extra: Sequence[Callable] = tuple()):
         return v2.Compose([
@@ -171,11 +190,16 @@ class ImagenetDataModule(TaskDataModule):
                 ds = str(path / "val")
             else:
                 raise ValueError(f"Unknown split {split}")
-            ds_cls = ImageFolderCached if cache_data else ImageFolder
+            ds_cls = ImageFolderCached if cache_data else RepeatedImageFolder
         else:
             raise ValueError(f"Image size {self.image_size} not supported")
-        return ds_cls(ds, transform=self._get_transforms_from_split(split))  # type: ignore
-        
+        num_augmentations = self.num_augmentations if split == "train" else 1
+        return ds_cls(
+            ds,
+            transform=self._get_transforms_from_split(split),
+            num_augmentations=num_augmentations,
+        )  # type: ignore
+
     def _get_transforms_from_split(self, split: Optional[str]):
         if split is None:
             return None

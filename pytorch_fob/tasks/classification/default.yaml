@@ -23,6 +23,7 @@ task:
     padding: 1
    maxpool: true
   train_transforms:
+    repeat_augmentations: 1
     random_crop:
       use: true
       size: 64
