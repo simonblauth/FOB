@@ -28,6 +28,9 @@ class ImagenetModel(TaskModel):
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
         imgs, labels = batch
+        if imgs.size(0) % 2 != 0:
+            imgs = torch.cat([imgs, imgs[-1].unsqueeze(0)], dim=0)
+            labels = torch.cat([labels, labels[-1].unsqueeze(0)], dim=0)
         preds, soft_labels = self.forward(self.transforms(imgs, labels))
         loss = self.compute_and_log_loss(preds, soft_labels, "train")
         self.compute_and_log_acc(preds, labels, "train")
