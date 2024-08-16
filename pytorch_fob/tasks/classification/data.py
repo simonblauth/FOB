@@ -2,9 +2,10 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 import numpy as np
 import tensorflow_datasets as tfds
+import webdataset as wds
 import torch
 from torch.utils.data import Dataset
-from torchvision.datasets.folder import ImageFolder
+from torchvision.datasets import ImageNet
 from torchvision.transforms import v2
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, create_transform
 from pytorch_fob.engine.utils import log_info
@@ -12,7 +13,7 @@ from pytorch_fob.tasks import TaskDataModule
 from pytorch_fob.engine.configs import TaskConfig
 
 
-class RepeatedImageFolder(ImageFolder):
+class RepeatedImageNet(ImageNet):
     def __init__(self, *args, num_augmentations: int = 1, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.num_augmentations = num_augmentations
@@ -23,25 +24,6 @@ class RepeatedImageFolder(ImageFolder):
     def __getitem__(self, index):
         orig_index = index // self.num_augmentations
         return super().__getitem__(orig_index)
-
-
-class ImageFolderCached(RepeatedImageFolder):
-    # TODO: find a way to share the memory between processes, otherwise this is useless
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.images = []
-        self.labels = []
-
-        log_info("loading dataset to memory...")
-        for path, label in self.samples:
-            self.images.append(self.loader(path))
-            self.labels.append(label)
-
-    def __getitem__(self, index):
-        orig_index = index // self.num_augmentations
-        image = self.images[orig_index] if self.transform is None else self.transform(self.images[orig_index])
-        label = self.targets[orig_index] if self.target_transform is None else self.target_transform(self.targets[orig_index])
-        return image, label
 
 
 class Imagenet64Dataset(Dataset):
@@ -84,6 +66,8 @@ class ImagenetDataModule(TaskDataModule):
         self.train_transforms = self._get_train_transforms(config)
         self.val_transforms = self._get_val_transforms()
         self.num_augmentations = config.train_transforms.repeat_augmentations
+        self.shardsize = 10_000
+        self.collate_fn = identity
 
     def _get_transforms(self, extra: Sequence[Callable] = tuple()):
         return v2.Compose([
@@ -166,39 +150,115 @@ class ImagenetDataModule(TaskDataModule):
             return
         self._setup(stage, cache_data=True)
 
+    def train_dataloader(self):
+        if isinstance(self.data_train, wds.DataPipeline):
+            return wds.WebLoader(
+                self.data_train,
+                batch_size=None,
+                shuffle=False,
+                num_workers=self.workers,
+                collate_fn=self.collate_fn,
+            ).unbatched().shuffle(self.shardsize).batched(self.batch_size).with_epoch(self._wds_epoch("train")).with_length(self._wds_epoch("train"))
+        return super().train_dataloader()
+
+    def val_dataloader(self):
+        if isinstance(self.data_val, wds.DataPipeline):
+            return wds.WebLoader(
+                self.data_val,
+                batch_size=None,
+                shuffle=False,
+                num_workers=self.workers,
+                collate_fn=self.collate_fn,
+            ).with_length(self._wds_epoch("validation"))
+        return super().val_dataloader()
+
+    def test_dataloader(self):
+        if isinstance(self.data_test, wds.DataPipeline):
+            return wds.WebLoader(
+                self.data_test,
+                batch_size=None,
+                shuffle=False,
+                num_workers=self.workers,
+                collate_fn=self.collate_fn,
+            ).with_length(self._wds_epoch("test", devices=1))
+        return super().test_dataloader()
+
+    def predict_dataloader(self):
+        if isinstance(self.data_predict, wds.DataPipeline):
+            return wds.WebLoader(
+                self.data_predict,
+                batch_size=None,
+                shuffle=False,
+                num_workers=self.workers,
+                collate_fn=self.collate_fn,
+            ).with_length(self._wds_epoch("predict"))
+        return super().predict_dataloader()
+
     def _load_dataset(
             self,
             split: Optional[str],
             cache_data: bool = False,
             download: bool = False
         ) -> Dataset:
+        num_augmentations = self.num_augmentations if split == "train" else 1
+        # resized imagenet
         if self.image_size in [16, 32, 64]:
-            ds = tfds.data_source(
+            dsrc = tfds.data_source(
                 f"imagenet_resized/{self.image_size}x{self.image_size}",
                 split=split,
                 data_dir=self.data_dir,
                 download=download
             )
             ds_cls = Imagenet64DatasetCached if cache_data else Imagenet64Dataset
-        elif self.image_size == 224:
-            path = self.data_dir / "imagenet_full" if "imagenet_path" not in self.config else Path(self.config.imagenet_path)
-            if download:
-                _check_imagenet_files(path)
-            if split == "train" or split is None:
-                ds = str(path / "train")
-            elif split == "validation":
-                ds = str(path / "val")
-            else:
-                raise ValueError(f"Unknown split {split}")
-            ds_cls = ImageFolderCached if cache_data else RepeatedImageFolder
-        else:
-            raise ValueError(f"Image size {self.image_size} not supported")
-        num_augmentations = self.num_augmentations if split == "train" else 1
-        return ds_cls(
-            ds,
+            return ds_cls(
+                dsrc,
+                transform=self._get_transforms_from_split(split),
+                num_augmentations=num_augmentations,
+            )
+        # full imagenet
+        path = self.data_dir / "imagenet_full" if "imagenet_path" not in self.config else Path(self.config.imagenet_path)
+        if (path / "shards").is_dir():
+            urls = str(path / "shards" / self._wds_shard_pattern(split))
+            sl = wds.ResampledShards if split == "train" else wds.SimpleShardList
+            shard_shuffle = self._wds_shard_count(split) if split == "train" else 0
+            sample_shuffle = self.shardsize if split == "train" else 0
+            return wds.DataPipeline(
+                sl(urls),
+                wds.shuffle(shard_shuffle),
+                wds.split_by_node,
+                wds.split_by_worker,
+                wds.tarfile_to_samples(),
+                wds.shuffle(sample_shuffle),
+                wds.decode("pil"),
+                wds.to_tuple("jpg", "cls"),
+                wds.map_tuple(self._get_transforms_from_split(split), torch.tensor),
+                wds.batched(self.batch_size, partial=False),
+            ).with_length(self._wds_len(split))
+        return RepeatedImageNet(
+            path,
+            split=split.replace("validation", "val"),
             transform=self._get_transforms_from_split(split),
             num_augmentations=num_augmentations,
-        )  # type: ignore
+        )
+
+    def _wds_shard_count(self, split: Optional[str]):
+        if split is None or split == "train":
+            return 147
+        else:
+            return 7
+
+    def _wds_shard_pattern(self, split: Optional[str]):
+        s = "train" if split is None or split == "train" else "val"
+        lo, hi = 0, self._wds_shard_count(split) - 1
+        return f"imagenet-{s}-{{{lo:06d}..{hi:06d}}}.tar"
+
+    def _wds_len(self, split: Optional[str] = None):
+        aug = self.num_augmentations if split is None or split == "train" else 1
+        return aug * self._wds_shard_count(split) * self.shardsize
+
+    def _wds_epoch(self, split: Optional[str] = None, devices: Optional[int] = None):
+        dev = self.config.devices if devices is None else devices
+        return self._wds_len(split) // self.batch_size // dev
 
     def _get_transforms_from_split(self, split: Optional[str]):
         if split is None:
@@ -211,14 +271,5 @@ class ImagenetDataModule(TaskDataModule):
             raise ValueError(f"Unknown split {split}")
 
 
-def _check_imagenet_files(data_dir: Path):
-    valid = data_dir.is_dir()
-    msg = f"Please download the full imagenet dataset to {data_dir} or specify a different path under `task.imagenet_path`"
-    if not valid:
-        raise ValueError(msg)
-    def count_images_in_directory(d: Path) -> int:
-        return sum(1 for _ in d.rglob('*.[Jj][Pp]*[Gg]'))
-    valid = valid and count_images_in_directory(data_dir / "train") == 1281167
-    valid = valid and count_images_in_directory(data_dir / "val") == 50000
-    if not valid:
-        raise ValueError(msg)
+def identity(x):
+    return x

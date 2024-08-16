@@ -51,6 +51,7 @@ class TaskConfig(NamedConfig):
         self.batch_size: int = cfg["batch_size"]
         self.cache_data: bool = config[engine_key].get("cache_data", False)
         self.data_dir = Path(config[engine_key]["data_dir"]).resolve()
+        self.devices: int = some(config[engine_key]["devices"], default=1)
         self.max_epochs: int = cfg["max_epochs"]
         self.max_steps: int = cfg.get("max_steps", None)
         self.target_metric: str = cfg["target_metric"]
@@ -58,6 +59,7 @@ class TaskConfig(NamedConfig):
         self.workers = config[engine_key]["workers"]
         cfg["cache_data"] = self.cache_data
         cfg["data_dir"] = self.data_dir
+        cfg["devices"] = self.devices
         cfg["workers"] = self.workers
         super().__init__(cfg, identifier_key, outdir_key)
 
