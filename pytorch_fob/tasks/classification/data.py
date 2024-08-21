@@ -67,7 +67,9 @@ class ImagenetDataModule(TaskDataModule):
         self.val_transforms = self._get_val_transforms()
         self.num_augmentations = config.train_transforms.repeat_augmentations
         self.shardsize = 10_000
-        self.collate_fn = identity
+        if self.resize:
+            # no collate fn needed for wds
+            self.collate_fn = identity 
 
     def _get_transforms(self, extra: Sequence[Callable] = tuple()):
         return v2.Compose([
