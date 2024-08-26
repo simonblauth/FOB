@@ -548,7 +548,9 @@ def _single_tensor_adam(params: List[Tensor],
                 if step > reg_step_size * 3 and prev_reg_gradient > current_reg_gradient and prev_reg_second_derivative > 0 and current_reg_second_derivative <= 0: # TODO do for foreach!
                     kappa.mul_(0).add_(current_l2m)
                     remaining_steps = train_step - step
-                    lr_decay_factor.copy_(lr_decay ** (1 / remaining_steps))
+                    # zero division possible
+                    if remaining_steps > 0:
+                        lr_decay_factor.copy_(lr_decay ** (1 / remaining_steps))
 
                 # Update previous values for next iteration
                 prev_reg.copy_(current_l2m)
