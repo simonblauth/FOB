@@ -14,14 +14,14 @@ def to_optimizer_dict(
         lr_index_master: dict[str, int],
         weight_decay: float,
         lr_grad: float,
+        update_all: bool = False,
     ) -> dict[str, list[Parameter] | Any]:
     names = sorted(pg.named_parameters)
-    is_master = pg.weight_decay_multiplier is None or pg.weight_decay_multiplier > 0
+    is_regularized = pg.weight_decay_multiplier is None or pg.weight_decay_multiplier > 0
     d = {
         "params": [pg.named_parameters[n] for n in names],
         "names": names,
-        "regularized": is_master,
-        "lr_update": is_master,
+        "lr_update": update_all or is_regularized,
         "lr": 0,  # not used, just so LRMonitor doesn't crash
         "weight_decay": pg.weight_decay_multiplier * weight_decay \
                 if pg.weight_decay_multiplier is not None else weight_decay,
@@ -55,7 +55,7 @@ def configure_optimizers(model: GroupedModel, config: OptimizerConfig) -> Optimi
     weight_decay = config.weight_decay
     parameter_groups = model.parameter_groups()
     lr_index_master = fill_master_dict(parameter_groups)
-    params_fob = [to_optimizer_dict(pg, lr_index_master, weight_decay, lr_grad) for pg in parameter_groups]
+    params_fob = [to_optimizer_dict(pg, lr_index_master, weight_decay, lr_grad, update_all=config.update_all) for pg in parameter_groups]
     if config.lr_scheduler.scheduler == "cosine":
         optimizer = AdamPlusWD_Cosine(
             params=params_fob,
@@ -64,6 +64,7 @@ def configure_optimizers(model: GroupedModel, config: OptimizerConfig) -> Optimi
             lr_decay=config.lr_decay,
             betas=(config.beta1, config.beta2),
             eps=config.epsilon,
+            alpha=config.alpha,
             reg_step_size=config.reg_step_size,
             weight_decay=weight_decay,
             foreach=config.foreach,

@@ -7,4 +7,6 @@ optimizer:
   beta2: 0.999          # Adam parameter
   epsilon: 1.e-8        # Adam parameter
   reg_step_size: 100    # Interval in which to check for inflection point
+  alpha: 0.9            # smoothing factor
+  update_all: false     # whether to update the lr of all parameters
   foreach: true

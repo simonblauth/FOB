@@ -34,7 +34,8 @@ class AdamPlus(Optimizer):
         lr_decay (float, optional): How much to decay the learning rate as a factor of the peak value. Defaults to 0.01.
         betas (Tuple[float, float], optional): The beta parameters. Defaults to (0.9, 0.999).
         eps (float, optional): The epsilon value. Defaults to 1e-8.
-        reg_step_size (int, optional): The interval at which the detection of the l2 inflection point takes place. Defaults to 100.
+        alpha (float, optional): The smoothing factor for the EMA of the l2. Defaults to 0.9.
+        reg_step_size (int, optional): The interval at which the detection of the l2 inflection point takes place. Given as a factor of the training steps. Defaults to 0.01.
         weight_decay (float, optional): The weight decay. Defaults to 1e-2.
         amsgrad (bool, optional): Whether to use AMSGrad. Defaults to False.
 
@@ -53,7 +54,8 @@ class AdamPlus(Optimizer):
         lr_decay: float = 0.01,
         betas: Tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
-        reg_step_size: int = 100,
+        alpha: float = 0.9,
+        reg_step_size: float = 0.01,
         weight_decay: float = 1e-2,
         amsgrad: bool = False,
         *,
@@ -76,7 +78,8 @@ class AdamPlus(Optimizer):
         if not 0.0 <= weight_decay:
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
 
-        self.reg_step_size = reg_step_size
+        self.alpha = alpha
+        self.reg_step_size = max(int(reg_step_size * train_steps), 1)
         self.train_steps = train_steps
 
         defaults = dict(
@@ -301,6 +304,7 @@ class AdamPlus(Optimizer):
                 lr_grad=group["lr_grad"],
                 lr_decay=group["lr_decay"],
                 train_steps=self.train_steps,
+                alpha=self.alpha,
                 reg_step_size=self.reg_step_size,
                 eps=group["eps"],
                 maximize=group["maximize"],
@@ -345,6 +349,7 @@ def adamplus(
     lr_grad: Union[float, Tensor],
     lr_decay: float,
     train_steps: int,
+    alpha: float,
     reg_step_size: int,
     eps: float,
     maximize: bool,
@@ -406,6 +411,7 @@ def adamplus(
         lr_grad=lr_grad,
         lr_decay=lr_decay,
         train_steps=train_steps,
+        alpha=alpha,
         reg_step_size=reg_step_size,
         eps=eps,
         maximize=maximize,
@@ -440,6 +446,7 @@ def _single_tensor_adamw(
     lr_grad: Union[float, Tensor],
     lr_decay: float,
     train_steps: int,
+    alpha: float,
     reg_step_size: int,
     eps: float,
     maximize: bool,
@@ -543,7 +550,7 @@ def _single_tensor_adamw(
                 )
                 lr.sub_(min_lr).mul_(factor).add_(min_lr)
             elif step % reg_step_size == 0 and decay_step == -1:
-                current_l2m = param.square().mean()
+                current_l2m = param.square().mean() * alpha + (1 - alpha) * prev_reg
                 if step > reg_step_size:
                     current_reg_gradient = current_l2m - prev_reg
                 if step > reg_step_size * 2:
@@ -599,6 +606,7 @@ def _multi_tensor_adamw(
     lr_grad: Union[float, Tensor],
     lr_decay: float,
     train_steps: int,
+    alpha: float,
     reg_step_size: int,
     eps: float,
     maximize: bool,
@@ -698,7 +706,7 @@ def _multi_tensor_adamw(
             torch._foreach_neg_(bias_correction2)
 
             # foreach_div doesn't allow a scalar as the first arg
-            torch._foreach_div_(bias_correction1, lr)
+            torch._foreach_div_(bias_correction1, device_lrs)
             torch._foreach_reciprocal_(bias_correction1)
 
             torch._foreach_sqrt_(bias_correction2)
@@ -751,9 +759,12 @@ def _multi_tensor_adamw(
                 if device_state_steps[0] % reg_step_size == 0:
                     square_params = torch._foreach_pow(device_params, 2)
 
-                    current_l2ss = [square_param.sum() for square_param in square_params]
+                    current_l2ms = torch._foreach_add(
+                        torch._foreach_mul([square_param.mean() for square_param in square_params], alpha),
+                        torch._foreach_mul(prev_regs, (1 - alpha)),
+                    )
                     if device_state_steps[0] > reg_step_size:
-                        current_gradients = torch._foreach_sub(current_l2ss, device_prev_regs)
+                        current_gradients = torch._foreach_sub(current_l2ms, device_prev_regs)
                     if device_state_steps[0] > reg_step_size * 2:
                         current_reg_second_derivatives = torch._foreach_sub(
                             current_gradients, device_prev_reg_gradients
@@ -767,7 +778,7 @@ def _multi_tensor_adamw(
                                 device_min_lrs[i].copy_(device_lrs[i] * lr_decay)
 
                     # Update previous values for next iteration
-                    torch._foreach_copy_(device_prev_regs, current_l2ss)
+                    torch._foreach_copy_(device_prev_regs, current_l2ms)
                     if device_state_steps[0] > reg_step_size:
                         torch._foreach_copy_(device_prev_reg_gradients, current_gradients)
                     if device_state_steps[0] > reg_step_size * 2:
