@@ -35,6 +35,7 @@ class AdamPlus(Optimizer):
         betas (Tuple[float, float], optional): The beta parameters. Defaults to (0.9, 0.999).
         eps (float, optional): The epsilon value. Defaults to 1e-8.
         alpha (float, optional): The smoothing factor for the EMA of the ELR. Defaults to 0.9.
+        reg_step_size (float, optional): The interval at which the running exponential average of the ELR takes place. Given as a factor of the training steps. Defaults to 0.01.
         weight_decay (float, optional): The weight decay. Defaults to 1e-2.
         amsgrad (bool, optional): Whether to use AMSGrad. Defaults to False.
 
@@ -54,6 +55,7 @@ class AdamPlus(Optimizer):
         betas: Tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
         alpha: float = 0.9,
+        reg_step_size: float = 0.01,
         weight_decay: float = 1e-2,
         amsgrad: bool = False,
         *,
@@ -77,6 +79,7 @@ class AdamPlus(Optimizer):
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
 
         self.alpha = alpha
+        self.reg_step_size = max(int(reg_step_size * train_steps), 1)
         self.train_steps = train_steps
 
         defaults = dict(
@@ -290,6 +293,7 @@ class AdamPlus(Optimizer):
                 lr_decay=group["lr_decay"],
                 train_steps=self.train_steps,
                 alpha=self.alpha,
+                reg_step_size=self.reg_step_size,
                 eps=group["eps"],
                 maximize=group["maximize"],
                 foreach=group["foreach"],
@@ -332,6 +336,7 @@ def adamplus(
     lr_decay: float,
     train_steps: int,
     alpha: float,
+    reg_step_size: int,
     eps: float,
     maximize: bool,
 ):
@@ -371,8 +376,7 @@ def adamplus(
     else:
         func = _single_tensor_adamw
 
-    # TODO: multi
-    _single_tensor_adamw(
+    func(
         params,
         grads,
         exp_avgs,
@@ -392,6 +396,7 @@ def adamplus(
         lr_decay=lr_decay,
         train_steps=train_steps,
         alpha=alpha,
+        reg_step_size=reg_step_size,
         eps=eps,
         maximize=maximize,
         capturable=capturable,
@@ -424,6 +429,7 @@ def _single_tensor_adamw(
     lr_decay: float,
     train_steps: int,
     alpha: float,
+    reg_step_size: int,
     eps: float,
     maximize: bool,
     capturable: bool,
@@ -523,18 +529,21 @@ def _single_tensor_adamw(
                     1 + torch.cos(torch.pi * (cur_step - 1) / T_max)
                 )
                 lr.sub_(min_lr).mul_(factor).add_(min_lr)
-            elif decay_step == -1:
+            elif step % reg_step_size == 0 and decay_step == -1:
+                # compute elr
                 l2_param = torch.linalg.vector_norm(param)
                 l2_grad = torch.linalg.vector_norm(grad)
                 current_elr = l2_grad / l2_param if l2_param != 0 else 0.0
                 elr_exp_avg.mul_(1 - alpha).add_(current_elr * alpha)
 
-                # Peak detection for gradient
+                # check if we should decay
                 if elr_exp_avg != 0.0 and elr_exp_avg < lr:
                     decay_step.copy_(step)
                     min_lr.copy_(lr * lr_decay)
                 else:
                     lr.add_(lr_grad)
+            elif decay_step == -1:
+                lr.add_(lr_grad)
 
         # Lastly, switch back to complex view
         if amsgrad and torch.is_complex(params[i]):
@@ -548,9 +557,7 @@ def _multi_tensor_adamw(
     exp_avg_sqs: List[Tensor],
     max_exp_avg_sqs: List[Tensor],
     lrs: List[Tensor],
-    prev_regs: List[Tensor],
-    prev_reg_gradients: List[Tensor],
-    prev_reg_second_derivatives: List[Tensor],
+    elr_exp_avgs: List[Tensor],
     decay_steps: List[Tensor],
     min_lrs: List[Tensor],
     state_steps: List[Tensor],
@@ -565,6 +572,7 @@ def _multi_tensor_adamw(
     lr_grad: Union[float, Tensor],
     lr_decay: float,
     train_steps: int,
+    alpha: float,
     reg_step_size: int,
     eps: float,
     maximize: bool,
@@ -596,9 +604,7 @@ def _multi_tensor_adamw(
             exp_avg_sqs,
             max_exp_avg_sqs,
             lrs,
-            prev_regs,
-            prev_reg_gradients,
-            prev_reg_second_derivatives,
+            elr_exp_avgs,
             decay_steps,
             min_lrs,
             state_steps,
@@ -611,9 +617,7 @@ def _multi_tensor_adamw(
         device_exp_avg_sqs,
         device_max_exp_avg_sqs,
         device_lrs,
-        device_prev_regs,
-        device_prev_reg_gradients,
-        device_prev_reg_second_derivatives,
+        device_elr_exp_avgs,
         device_decay_steps,
         device_min_lrs,
         device_state_steps,
@@ -626,13 +630,7 @@ def _multi_tensor_adamw(
         device_exp_avg_sqs = [torch.view_as_real(x) if torch.is_complex(x) else x for x in device_exp_avg_sqs]
         device_max_exp_avg_sqs = [torch.view_as_real(x) if torch.is_complex(x) else x for x in device_max_exp_avg_sqs]
         device_lrs = [torch.view_as_real(x) if torch.is_complex(x) else x for x in device_lrs]
-        device_prev_regs = [torch.view_as_real(x) if torch.is_complex(x) else x for x in device_prev_regs]
-        device_prev_reg_gradients = [
-            torch.view_as_real(x) if torch.is_complex(x) else x for x in device_prev_reg_gradients
-        ]
-        device_prev_reg_second_derivatives = [
-            torch.view_as_real(x) if torch.is_complex(x) else x for x in device_prev_reg_second_derivatives
-        ]
+        device_elr_exp_avgs = [torch.view_as_real(x) if torch.is_complex(x) else x for x in device_elr_exp_avgs]
         device_decay_steps = [torch.view_as_real(x) if torch.is_complex(x) else x for x in device_decay_steps]
         device_min_lrs = [torch.view_as_real(x) if torch.is_complex(x) else x for x in device_min_lrs]
         device_params = [torch.view_as_real(x) if torch.is_complex(x) else x for x in device_params]
@@ -651,6 +649,71 @@ def _multi_tensor_adamw(
         torch._foreach_mul_(device_exp_avg_sqs, beta2)
         torch._foreach_addcmul_(device_exp_avg_sqs, device_grads, device_grads, 1 - beta2)
 
+        # update lrs before deleting gradients
+        if lr_update:
+            if all([decay_steps != -1 for decay_steps in device_decay_steps]):
+                cur_steps = torch._foreach_sub(device_state_steps, device_decay_steps)
+                T_maxs = torch._foreach_add(torch._foreach_mul(device_decay_steps, -1), train_steps)
+                nums = torch._foreach_add(
+                    torch._foreach_cos(
+                        torch._foreach_mul(
+                            torch._foreach_div(cur_steps, T_maxs),
+                            torch.pi
+                        )
+                    ),
+                    1
+                )
+                denoms = torch._foreach_add(
+                    torch._foreach_cos(
+                        torch._foreach_mul(
+                            torch._foreach_div(
+                                torch._foreach_sub(cur_steps, 1),
+                            T_maxs),
+                            torch.pi
+                        )
+                    ),
+                    1
+                )
+                torch._foreach_sub_(device_lrs, device_min_lrs)
+                torch._foreach_mul_(device_lrs, torch._foreach_div(nums, denoms))
+                torch._foreach_add_(device_lrs, device_min_lrs)
+            # this is slower than the for-loop somehow
+            # elif all([decay_steps == -1 for decay_steps in device_decay_steps]):
+            #     l2_params = torch._foreach_sqrt([param.sum() for param in torch._foreach_pow(device_params, 2)])
+            #     l2_grads = torch._foreach_sqrt([grad.sum() for grad in torch._foreach_pow(device_grads, 2)])
+            #     current_elrs = [(elr if torch.isfinite(elr) else torch.mul(elr, 0.)) for elr in torch._foreach_div(l2_grads, l2_params)]
+            #     torch._foreach_mul_(device_elr_exp_avgs, 1 - alpha)
+            #     torch._foreach_add_(device_elr_exp_avgs, torch._foreach_mul(current_elrs, alpha))
+
+            #     for i in range(len(device_params)):
+            #         if device_elr_exp_avgs[i] != 0 and device_elr_exp_avgs[i] < device_lrs[i]:
+            #             device_decay_steps[i].copy_(device_state_steps[i])
+            #             device_min_lrs[i].copy_(device_lrs[i] * lr_decay)
+            #         else:
+            #             device_lrs[i].add_(lr_grad)
+            else:
+                for i in range(len(device_params)):
+                    if device_decay_steps[i] > 0:
+                        cur_step = device_state_steps[i] - device_decay_steps[i]
+                        T_max = train_steps - device_decay_steps[i]
+                        factor = (1 + torch.cos(torch.pi * cur_step / T_max)) / (
+                            1 + torch.cos(torch.pi * (cur_step - 1) / T_max)
+                        )
+                        device_lrs[i].sub_(device_min_lrs[i]).mul_(factor).add_(device_min_lrs[i])
+                    elif device_state_steps[i] % reg_step_size == 0 and device_decay_steps[i] == -1:
+                        l2_param = torch.linalg.vector_norm(device_params[i])
+                        l2_grad = torch.linalg.vector_norm(device_grads[i])
+                        current_elr = l2_grad / l2_param if l2_param != 0 else 0.0
+                        device_elr_exp_avgs[i].mul_(1 - alpha).add_(current_elr * alpha)
+
+                        if device_elr_exp_avgs[i] != 0 and device_elr_exp_avgs[i] < device_lrs[i]:
+                            device_decay_steps[i].copy_(device_state_steps[i])
+                            device_min_lrs[i].copy_(device_lrs[i] * lr_decay)
+                        else:
+                            device_lrs[i].add_(lr_grad)
+                    elif device_decay_steps[i] == -1:
+                        device_lrs[i].add_(lr_grad)
+
         # Delete the local intermediate since it won't be used anymore to save on peak memory
         del device_grads
 
@@ -664,7 +727,7 @@ def _multi_tensor_adamw(
             torch._foreach_neg_(bias_correction2)
 
             # foreach_div doesn't allow a scalar as the first arg
-            torch._foreach_div_(bias_correction1, lr)
+            torch._foreach_div_(bias_correction1, device_lrs)
             torch._foreach_reciprocal_(bias_correction1)
 
             torch._foreach_sqrt_(bias_correction2)
@@ -710,49 +773,6 @@ def _multi_tensor_adamw(
             torch._foreach_div_(exp_avg_sq_sqrt, bias_correction2_sqrt)
             torch._foreach_add_(exp_avg_sq_sqrt, eps)
             torch._foreach_addcdiv_(device_params, device_exp_avgs, exp_avg_sq_sqrt, step_size)
-
-        if lr_update:
-            # warmup phase
-            if any([decay_step == -1 for decay_step in device_decay_steps]):
-                if device_state_steps[0] % reg_step_size == 0:
-                    square_params = torch._foreach_pow(device_params, 2)
-
-                    current_l2ss = [square_param.sum() for square_param in square_params]
-                    if device_state_steps[0] > reg_step_size:
-                        current_gradients = torch._foreach_sub(current_l2ss, device_prev_regs)
-                    if device_state_steps[0] > reg_step_size * 2:
-                        current_reg_second_derivatives = torch._foreach_sub(
-                            current_gradients, device_prev_reg_gradients
-                        )
-
-                    # Peak detection for gradient
-                    if device_state_steps[0] > reg_step_size * 3:
-                        for i in range(len(device_params)):
-                            if device_prev_reg_gradients[i] > current_gradients[i] and device_decay_steps[i] == -1:
-                                device_decay_steps[i].copy_(device_state_steps[0])
-                                device_min_lrs[i].copy_(device_lrs[i] * lr_decay)
-
-                    # Update previous values for next iteration
-                    torch._foreach_copy_(device_prev_regs, current_l2ss)
-                    if device_state_steps[0] > reg_step_size:
-                        torch._foreach_copy_(device_prev_reg_gradients, current_gradients)
-                    if device_state_steps[0] > reg_step_size * 2:
-                        torch._foreach_copy_(device_prev_reg_second_derivatives, current_reg_second_derivatives)
-
-                for i in range(len(device_decay_steps)):
-                    if device_decay_steps[i] == -1:
-                        device_lrs[i].add_(lr_grad)
-
-            # cosine decay phase
-            if any([decay_step > 0 for decay_step in device_decay_steps]):
-                for i in range(len(device_decay_steps)):
-                    if device_decay_steps[i] > 0:
-                        cur_step = device_state_steps[i] - device_decay_steps[i]
-                        T_max = train_steps - device_decay_steps[i]
-                        factor = (1 + torch.cos(torch.pi * cur_step / T_max)) / (
-                            1 + torch.cos(torch.pi * (cur_step - 1) / T_max)
-                        )
-                        device_lrs[i].sub_(device_min_lrs[i]).mul_(factor).add_(device_min_lrs[i])
 
 
 def _fused_adamw(
